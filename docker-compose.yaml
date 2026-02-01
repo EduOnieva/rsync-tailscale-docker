@@ -1,0 +1,51 @@
+services:
+  tailscale: 
+    container_name: tailscale-backup
+    hostname: your-hostname
+    image: tailscale/tailscale:stable 
+    ports:
+      - "2222:80"
+    environment:
+      - TS_AUTHKEY=your_tailscale_auth_key_here
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+    volumes: 
+      - ./config/tailscale/state:/var/lib/tailscale
+      - ./config/tailscale/config:/config
+    cap_add:
+      - net_admin
+      - sys_module
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    networks:
+      backup:
+        ipv4_address: 192.168.6.10
+
+  rsync-backup:
+    container_name: rsync-backup
+    build:
+      context: .
+      dockerfile: build/Dockerfile
+    volumes:
+      - ./config:/config
+      - ~/.ssh:/mnt/ssh_keys:ro
+      - /path/to/your/data1:/data/source1
+      - /path/to/your/data2:/data/source2
+    restart: unless-stopped
+    network_mode: service:tailscale
+    depends_on:
+      - tailscale
+    environment:
+      - REMOTE_USER=your_remote_username
+      - REMOTE_HOST=100.x.x.x  # Your Tailscale IP
+      - CRON_SCHEDULE=30 2 * * 1  # Weekly on Monday at 2:30 AM
+      - SSH_KEY_FILE=id_rsa
+      - TZ=Europe/Madrid  # Your timezone
+      - ROUTES_FILE=/src/backup_routes.json
+    
+networks:
+  backup:
+    ipam:
+      config:
+        - subnet: 192.168.6.0/24

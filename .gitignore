@@ -4,21 +4,21 @@ logs/
 
 # Build directories
 dist/
-build/
 
 # Docker
 *.env
 docker-compose.override.yml
 .dockerignore
-docker-compose.yaml
+
+# Sensitive files
+config/
+.ssh/
+*.key
+*.pem
 
 # OS generated files
 .DS_Store
 Thumbs.db
-
-# Git
-.git/
-.gitignore
 
 # Editor directories and files
 .idea/
@@ -28,6 +28,3 @@ Thumbs.db
 *.swn
 *.bak
 *.tmp
-
-# Gemini
-GEMINI.md

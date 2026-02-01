@@ -1,142 +1,236 @@
-# Docker Rsync
+# Docker Rsync with Tailscale Integration
+
+**This is a fork and enhanced version of [insrch/rsync](https://hub.docker.com/r/insrch/rsync)**
 
 Dockerhub page: https://hub.docker.com/r/insrch/rsync
 
 ## Overview
 
-Initially, I was looking for a ready-made solution but couldn't find one that met my needs, especially with support for ARM and a simple setup. So, I decided to create my own Docker image and share it for others who are also looking for an easy-to-use solution.
+This project is an enhanced version of the original `insrch/rsync` Docker image, now featuring Tailscale integration, a web management interface, and JSON-based route configuration. The change was made for self-hosted remote backup solutions requiring secure access and multi-route backup capabilities.
 
-By specifying the folder with the SSH key for remote connection, the sync schedule, the remote folder path, along with the host and user details, your files will be copied to the folder on the host where the container is running.
+**Key Enhancements:**
+- 🔗 **Tailscale VPN Integration** - Secure networking for remote backups
+- 🌐 **Web Management Interface** - Monitor logs and trigger syncs via browser
+- 📄 **JSON Route Configuration** - Define multiple backup routes in a single file
+- 🔒 **Enhanced SSH Security** - Improved connection handling and error reporting
+- 📊 **Real-time Monitoring** - Live sync progress and detailed logging
+- 🎯 **Multi-route Support** - Backup multiple directories in one operation
 
-This Docker image provides a lightweight, automated solution for synchronizing remote files using `rsync` over SSH. It is designed for scheduled sync operations using `cron`, ensuring that remote directories stay up to date without manual intervention.
+Instead of syncing a single remote directory, this version allows you to define multiple local-to-remote backup routes using a JSON configuration file, all accessible through a user-friendly web interface.
 
 ## Features
 
-- Automated file synchronization using `rsync`.
-- Secure SSH authentication via private keys.
-- Customizable cron scheduling for periodic syncs.
-- `PUID` (User ID) and `PGID` (Group ID) set the file ownership for synchronized files. They ensure the files are written with the correct user and group permissions on the host system.
-- Lightweight Alpine-based image for minimal resource usage.
+- **Tailscale VPN Integration** - Secure, encrypted connections to remote servers
+- **Web Management Interface** - Monitor sync status and logs via browser (port 2222)
+- **JSON Route Configuration** - Define multiple backup routes in `/config/backup_routes.json`
+- **Real-time Logging** - Detailed sync progress and error reporting
+- **Manual Sync Triggers** - Start backups on-demand through web interface
+- **Enhanced SSH Security** - Automatic host key verification bypass for VPN environments
+- **Multi-route Processing** - Backup multiple directories in a single operation
+- **Lightweight Alpine Base** - Minimal resource usage with essential tools (rsync, jq, python3)
+- **File Locking** - Prevents concurrent sync operations
 
 ## Installation
 
-### Running the Container
+### Docker Compose Setup (Recommended)
 
-```sh
-docker run -d \
-  --name rsync \
-  -v /path/to/local_folder:/data \
-  -v /path/to/ssh_keys:/mnt/ssh_keys:ro \
-  -e REMOTE_USER=user \
-  -e REMOTE_HOST=host.com \
-  -e REMOTE_PATH=/remote/directory \
-  -e SSH_KEY_FILE=id_rsa \
-  -e CRON_SCHEDULE="0 * * * *" \
-  -e PUID=1000 \
-  -e PGID=1000 \
-  -e TZ=Etc/UTC \
-  --restart unless-stopped \
-  insrch/rsync:latest
+Edit `docker-compose.yaml` with your specific values:
+
+```yaml
+services:
+  tailscale: 
+    container_name: tailscale-backup
+    hostname: your-hostname  # Change to your desired hostname
+    image: tailscale/tailscale:stable 
+    ports:
+      - "2222:80"  # Web interface port
+    environment:
+      - TS_AUTHKEY=your_tailscale_auth_key_here  # Get from Tailscale admin console
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+    volumes: 
+      - ./config/tailscale/state:/var/lib/tailscale
+      - ./config/tailscale/config:/config
+    cap_add:
+      - net_admin
+      - sys_module
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    networks:
+      backup:
+        ipv4_address: 192.168.6.10
+
+  rsync-backup:
+    container_name: rsync-backup
+    build:
+      context: .
+      dockerfile: build/Dockerfile
+    volumes:
+      - ./config:/config  # Config and logs directory
+      - ~/.ssh:/mnt/ssh_keys:ro  # SSH keys (read-only)
+      - /path/to/your/data1:/data/source1  # Local data to backup
+      - /path/to/your/data2:/data/source2  # More local data
+    restart: unless-stopped
+    network_mode: service:tailscale
+    depends_on:
+      - tailscale
+    environment:
+      - REMOTE_USER=your_remote_username  # SSH username on remote server
+      - REMOTE_HOST=100.x.x.x  # Tailscale IP of remote server
+      - CRON_SCHEDULE=30 2 * * 1  # Weekly on Monday at 2:30 AM
+      - SSH_KEY_FILE=id_rsa  # SSH key filename in ~/.ssh/
+      - TZ=Europe/Madrid  # Your timezone
+      - ROUTES_FILE=/src/backup_routes.json
+    
+networks:
+  backup:
+    ipam:
+      config:
+        - subnet: 192.168.6.0/24
+```
+
+### JSON Routes Configuration
+
+Edit `src/backup_routes.json` (maps local paths to remote destinations):
+
+```json
+{
+  "/data/source1/documents": "/mnt/backup/documents",
+  "/data/source1/photos": "/mnt/backup/photos",
+  "/data/source2/projects": "/mnt/backup/projects"
+}
 ```
 
 ## Environment Variables
 
-| Variable        | Description                                                       | Default  |
-| --------------- | ----------------------------------------------------------------- | -------- |
-| `REMOTE_USER`   | Username for the remote server                                    | Required |
-| `REMOTE_HOST`   | Remote server address                                             | Required |
-| `REMOTE_PATH`   | Directory on the remote server to sync from                       | Required |
-| `SSH_KEY_FILE`  | SSH private key filename that sould be used for remote connection | `id_rsa` |
-| `CRON_SCHEDULE` | Cron expression defining sync schedule                            | Required |
-| `PUID`          | User ID for file ownership during sync                            | `1000`   |
-| `PGID`          | Group ID for file ownership during sync                           | `1000`   |
-| `TZ`            | Timezone for the container (e.g., `UTC`, `Europe/London`)         | `UTC`    |
+| Variable        | Description                                           | Example Value           | Required |
+| --------------- | ----------------------------------------------------- | ----------------------- | -------- |
+| `TS_AUTHKEY`    | Tailscale authentication key                         | `tskey-auth-xxx...`     | Yes      |
+| `REMOTE_USER`   | SSH username on remote server                        | `your_remote_username`  | Yes      |
+| `REMOTE_HOST`   | Remote server Tailscale IP address                   | `100.x.x.x`            | Yes      |
+| `ROUTES_FILE`   | Path to JSON file defining backup routes             | `/src/backup_routes.json` | Yes      |
+| `CRON_SCHEDULE` | Cron expression for automated sync schedule          | `30 2 * * 1` (weekly)   | Yes      |
+| `SSH_KEY_FILE`  | SSH private key filename                              | `id_rsa`               | Yes      |
+| `TZ`            | Timezone for container                                | `Europe/Madrid`         | No       |
+
+### Getting Started
+
+1. **Get Tailscale Auth Key**: Visit [Tailscale Admin Console](https://login.tailscale.com/admin/settings/keys) to generate an auth key
+2. **Setup SSH Keys**: Ensure your SSH public key is authorized on the remote server
+3. **Configure Routes**: Create `src/backup_routes.json` with your backup mappings  
+4. **Update Variables**: Edit `docker-compose.yaml` with your specific values
+5. **Start Services**: Run `docker-compose up --build -d`
+
+## Web Interface
+
+Access the web management interface at `http://your_host:2222`
+
+Features:
+- 📊 **Real-time Sync Logs** - Monitor backup progress and errors
+- ▶️ **Manual Sync Trigger** - Start backups on-demand
+- 🔄 **Auto-refresh** - Live updates every 30 seconds
+- 📄 **Log Management** - Clear logs when needed
+- 💾 **System Status** - View load average and log file sizes
 
 ## Usage Examples
 
-### Basic Usage
+### SSH Key Setup
 
-```sh
-docker run -d \
-  -v ~/Downloads:/data:/data \
-  -v ~/.ssh:/mnt/ssh_keys:ro \
-  -e REMOTE_USER=ubuntu \
-  -e REMOTE_HOST=192.168.69.12 \
-  -e REMOTE_PATH=/home/ubuntu/downloads \
-  -e SSH_KEY_FILE=id_rsa \
-  -e CRON_SCHEDULE="0 2 * * *" \
-  insrch/rsync:latest
+1. Generate SSH key pair on your local machine:
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/backup_key
 ```
 
-This configuration syncs files from the remote directory every day at 2 AM.
+2. Copy public key to remote server:
+```bash
+ssh-copy-id -i ~/.ssh/backup_key.pub user@remote_host
+```
 
-### Using Docker Compose
+3. Place the private key in your config directory as `id_rsa`
+
+### Directory Structure
+
+```
+your_project/
+├── docker-compose.example.yaml  # Template configuration
+├── docker-compose.yaml          # Your actual configuration (gitignored)
+├── build/
+│   ├── Dockerfile
+│   └── entrypoint.sh
+├── src/
+│   ├── backup_routes.json       # Your backup route mappings
+│   ├── sync_script.sh
+│   └── web_server.py
+└── config/
+    ├── logs/                    # Sync and web server logs
+    │   ├── sync.log
+    │   └── web_server.log
+    └── tailscale/
+        ├── state/               # Tailscale connection state
+        └── config/
+```
+
+### Volume Mapping Examples
+
+Update the volumes in `docker-compose.yaml` to match your setup:
 
 ```yaml
-services:
-  rsync:
-    image: insrch/rsync:latest
-    container_name: rsync
-    restart: unless-stopped
-    volumes:
-      - /local/data:/data
-      - /path/to/ssh_keys:/mnt/ssh_keys:ro
-    environment:
-      - REMOTE_USER=user
-      - REMOTE_HOST=example.com
-      - REMOTE_PATH=/remote/directory
-      - SSH_KEY_FILE=id_rsa
-      - CRON_SCHEDULE=0 3 * * *
-      - PUID=1000
-      - PGID=1000
-      - TZ=Etc/UTC
+volumes:
+  # Configuration and logs (required)
+  - ./config:/config
+  
+  # SSH keys (required, read-only)
+  - ~/.ssh:/mnt/ssh_keys:ro
+  
+  # Your local data to backup (customize these paths)
+  - /home/user/Documents:/data/documents
+  - /home/user/Pictures:/data/pictures
+  - /media/external-drive:/data/external
+  - /var/lib/docker/volumes:/data/docker-volumes
 ```
-
-This example sets up a sync at 3 AM daily using Docker Compose.
 
 ## Troubleshooting
 
-### User / Group Identifiers
+### SSH Connection Issues
 
-When using volumes (`-v` flags), permissions issues can occur between the host OS and the container. To avoid this, you can specify the user `PUID` and group `PGID`.
-
-Make sure that any volume directories on the host are owned by the same user and group you specify. This will resolve any permission issues seamlessly.
-
-For example, if `PUID=1000` and `PGID=1000`, you can find your own identifiers by running the following command:
-
-```sh
-id your_user
+Check SSH connection manually:
+```bash
+docker exec -it rsync-backup ssh -i /.ssh/id_rsa user@tailscale_ip
 ```
 
-Example output:
+### Web Interface Not Accessible
 
-```sh
-uid=1000(your_user) gid=1000(your_user) groups=1000(your_user)
+Verify port mapping and container status:
+```bash
+docker logs rsync-backup
+curl http://localhost:2222
 ```
 
-### SSH Key Not Found
+### JSON Configuration Errors
 
-Ensure the SSH key is correctly mounted and the file exists:
-
-```sh
-ls -l /path/to/ssh_keys/
+Validate your routes file:
+```bash
+docker exec -it rsync-backup jq empty /config/backup_routes.json
 ```
 
-### Incorrect Permissions
+### View Detailed Logs
 
-If syncing fails due to permission errors, adjust ownership:
-
-```sh
-chown 1000:1000 /local/data -R
+Check sync and web server logs:
+```bash
+docker exec -it rsync-backup tail -f /config/logs/sync.log
 ```
 
-### Checking Logs
+### Manual Sync Testing
 
-Use the following command to inspect the logs:
-
-```sh
-docker logs -f container_id
+Run sync manually for testing:
+```bash
+docker exec -it rsync-backup /bin/bash /src/sync_script.sh
 ```
+
+## Acknowledgments
+
+This enhanced version was developed with the assistance of **GitHub Copilot** with Claude Sonnet 4 Agent.
 
 ## Contributing
 
