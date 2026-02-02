@@ -1,12 +1,8 @@
 # Docker Rsync with Tailscale Integration
 
-**This is a fork and enhanced version of [insrch/rsync](https://hub.docker.com/r/insrch/rsync)**
-
-Dockerhub page: https://hub.docker.com/r/insrch/rsync
-
 ## Overview
 
-This project is an enhanced version of the original `insrch/rsync` Docker image, now featuring Tailscale integration, a web management interface, and JSON-based route configuration. The project includes a comprehensive test suite with 82% code coverage and full containerized testing infrastructure.
+**This is a fork and enhanced version of [insrch/rsync](https://hub.docker.com/r/insrch/rsync)**, now featuring Tailscale integration, a web management interface, and JSON-based route configuration. The project includes a comprehensive test suite with 82% code coverage and full containerized testing infrastructure.
 
 **Key Enhancements:**
 - 🔗 **Tailscale VPN Integration** - Secure networking for remote backups
@@ -491,16 +487,7 @@ docker exec -it rsync-backup /bin/bash /src/sync_script.sh
 This enhanced version was developed with comprehensive testing infrastructure and advanced Docker containerization patterns. The project evolved from a simple rsync wrapper to a fully-tested, production-ready backup solution.
 
 **Development Assistance:**
-- **GitHub Copilot** with Claude Sonnet 4 Agent - Core development and testing infrastructure
-- **Container-based Testing** - Inspired by modern CI/CD practices
-- **Multi-stage Docker Builds** - Production optimization with testing capabilities
-
-**Key Contributions:**
-- 🧪 **119 comprehensive tests** achieving 82% code coverage
-- 🐳 **Advanced Docker patterns** with multi-stage builds and testing profiles
-- 🔒 **Security-first approach** with extensive input validation testing
-- 📊 **Real file operations testing** using temporary file systems
-- 🎯 **Advanced coverage targeting** for edge cases and exception paths
+GitHub Copilot with Claude Sonnet 4 Agent for documentation, code review and testing infrastructure
 
 **Original Project:**
 Based on [insrch/rsync](https://hub.docker.com/r/insrch/rsync) with significant enhancements for Tailscale integration and web management.
