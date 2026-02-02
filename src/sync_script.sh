@@ -156,6 +156,7 @@ log_info "Acquired sync lock successfully"
   success_count=0
   failure_count=0
   total_transferred=0
+  total_start_time=$(date +%s)
 
   # Process each route with enhanced error handling
   while IFS=$'\t' read -r src dst; do
@@ -199,7 +200,8 @@ log_info "Acquired sync lock successfully"
     
     if rsync -avzP --stats --timeout=3600 \
       --exclude='*.Trash*' --exclude='lost+found' --exclude='System Volume Information' \
-      --exclude='.DS_Store' --exclude='Thumbs.db' --exclude='desktop.ini' \
+      --exclude='.DS_Store' --exclude='Thumbs.db' --exclude='desktop.ini' --exclude='sync.log' \
+      --exclude='.venv' \
       -e "ssh -i /.ssh/id_rsa -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=60 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
       "$src/" "$REMOTE_USER@$REMOTE_HOST:$dst/" 2>&1 | tee -a "/config/logs/sync.log"; then
       
@@ -219,7 +221,9 @@ log_info "Acquired sync lock successfully"
   done < <(jq -r 'to_entries[] | "\(.key)\t\(.value)"' "$ROUTES_FILE")
 
   # Final statistics and summary
-  log_info "Sync process completed - Success: $success_count, Failures: $failure_count"
+  total_end_time=$(date +%s)
+  total_duration=$((total_end_time - total_start_time))
+  log_info "Sync process completed - Success: $success_count, Failures: $failure_count, Total Duration: ${total_duration}s"
   
   if [ "$failure_count" -gt 0 ]; then
     log_warn "Some syncs failed. Check logs for details."

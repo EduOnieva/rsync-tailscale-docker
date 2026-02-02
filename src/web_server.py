@@ -6,15 +6,17 @@ import logging.handlers
 import os
 import signal
 import socketserver
+import subprocess
 import sys
+
 from datetime import datetime
-from typing import Tuple, Optional
+from typing import Any, List, Optional, Tuple
 
 # Configuration
 LOG_FILE: str = '/config/logs/sync.log'
 SERVER_LOG_FILE: str = '/config/logs/web_server.log'
 PORT: int = 80
-MAX_LOG_SIZE: int = 1024 * 1024  # 1MB
+MAX_LOG_SIZE: int = 1024 * 1024 * 500  # 500 MB
 MAX_LOG_BACKUPS: int = 10
 
 # Ensure log directory exists before setting up logging
@@ -47,8 +49,8 @@ class EnhancedLogHandler(http.server.SimpleHTTPRequestHandler):
         '''Override to use our logger'''
         logger.info(f'{self.address_string()} - {format % args}')
 
-    def safe_read_log(self, log_path: str, max_lines: int = 1000) -> str:
-        '''Safely read log file with size limits'''
+    def safe_read_log(self, log_path: str, max_lines: int = 10000) -> str:
+        '''Safely read log file with size limits and error summary'''
         try:
             if not os.path.exists(log_path):
                 return 'Log file not found'
@@ -59,22 +61,124 @@ class EnhancedLogHandler(http.server.SimpleHTTPRequestHandler):
                 with open(log_path, 'rb') as f:
                     f.seek(-MAX_LOG_SIZE, 2)
                     content = f.read().decode('utf-8', errors='ignore')
-                    return f'[LOG TRUNCATED - showing last {MAX_LOG_SIZE} bytes]\n{content}'
+                    lines = content.splitlines()
+                    error_summary = self._generate_error_summary(
+                        lines, offset=0, truncated=True)
+                    full_content = '\n'.join(lines)
+                    return (
+                        f'{error_summary}[LOG TRUNCATED - showing last '
+                        f'{MAX_LOG_SIZE} bytes]\n{full_content}')
             else:
                 with open(log_path, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
+                    lines = [line.rstrip('\n') for line in lines]
+                    
                     if len(lines) > max_lines:
-                        truncated_lines = ''.join(lines[-max_lines:])
-                        return f'[LOG TRUNCATED - showing last {max_lines} lines]\n{truncated_lines}'
-                    return ''.join(lines)
+                        # Generate error summary for all lines, then truncate display
+                        error_summary = self._generate_error_summary(lines)
+                        truncated_lines = '\n'.join(lines[-max_lines:])
+                        return (
+                            f'{error_summary}[LOG TRUNCATED - showing last '
+                            f'{max_lines} lines]\n{truncated_lines}')
+                    else:
+                        error_summary = self._generate_error_summary(lines)
+                        return f'{error_summary}{chr(10).join(lines)}'
         except Exception as e:
             logger.error(f'Error reading log file {log_path}: {e}')
             return f'Error reading log file: {str(e)}'
 
+    def _generate_error_summary(self, lines: List[str], offset: int = 0, truncated: bool = False) -> str:
+        '''Generate a summary of errors found in the log with line numbers (size-limited)'''
+        errors = []
+        error_keywords = ['[ERROR]', '[CRITICAL]', 'ERROR:', 'CRITICAL:', 'Failed', 'Exception:', 'Traceback', 'Error:']
+        max_errors_to_show = 15  # Limit errors shown to prevent summary from getting too large
+        max_summary_chars = 2000  # Overall character limit for the entire summary
+        
+        for i, line in enumerate(lines, start=1 + offset):
+            if len(errors) >= max_errors_to_show * 2:  # Search more but limit display
+                break
+                
+            line_upper = line.upper()
+            if any(keyword.upper() in line_upper for keyword in error_keywords):
+                # Limit error line length for summary display
+                error_entry = f'Line {i}: {line}'
+                errors.append(error_entry)
+        
+        if not errors:
+            return '🟢 ERROR SUMMARY: No errors found\n' + '='*50 + '\n\n'
+        
+        error_count = len(errors)
+        summary_header = f'🔴 ERROR SUMMARY: {error_count} error{"s" if error_count != 1 else ""} found'
+        if truncated:
+            summary_header += ' (in displayed portion)'
+        summary_header += '\n' + '='*50 + '\n'
+        
+        # Limit to first max_errors_to_show errors in summary
+        displayed_errors = errors[:max_errors_to_show]
+        error_lines = '\n'.join(displayed_errors)
+        
+        if len(errors) > max_errors_to_show:
+            error_lines += f'\n... and {len(errors) - max_errors_to_show} more errors (see full log below)'
+        
+        summary_content = summary_header + error_lines + '\n' + '='*50 + '\n\n'
+        
+        # Final safety check - truncate entire summary if it's too long
+        if len(summary_content) > max_summary_chars:
+            truncation_point = max_summary_chars - 100  # Leave room for truncation message
+            summary_message = '\n[ERROR SUMMARY TRUNCATED - too many errors]\n' + '='*50 + '\n\n'
+            summary_content = summary_content[:truncation_point] + summary_message
+        
+        return summary_content
+
+    def get_sync_status(self) -> Tuple[str, str]:
+        '''Check if sync process is running based on last few log lines with improved robustness'''
+        try:
+            if not os.path.exists(LOG_FILE):
+                return '⚪ Unknown', '#7d8590'
+            
+            # Read last 5 lines to check status
+            with open(LOG_FILE, 'rb') as f:
+                # Go to end and read backwards to get last lines efficiently
+                f.seek(0, 2)  # Go to end
+                file_size = f.tell()
+                if file_size == 0:
+                    return '⚪ No logs', '#7d8590'
+                
+                # Read last 1KB to capture last few lines
+                read_size = min(1024, file_size)
+                f.seek(-read_size, 2)
+                content = f.read().decode('utf-8', errors='ignore')
+                lines = content.strip().split('\n')[-5:]  # Get last 5 lines
+            
+            # Check for completion indicators in last lines
+            for line in reversed(lines):
+                line = line.strip()
+                if 'All syncs completed successfully' in line:
+                    return '🟢 Completed', '#3fb950'
+                elif 'Some syncs failed. Check logs for details.' in line:
+                    return '🟡 Completed with errors', '#d29922'
+                elif 'Starting sync process.' in line:
+                    return '🔵 Running', '#79c0ff'
+                elif 'Logs cleared via web interface' in line:
+                    return '⚪ No run yet', '#7d8590'
+            
+            # Default to running if no clear completion status found
+            return '🔵 Running', '#79c0ff'
+            
+        except Exception as e:
+            logger.error(f'Error checking sync status: {e}')
+            return '❌ Error', '#f85149'
+
     def generate_html_page(self, sync_log: str, load_avg: Tuple[float, float, float]) -> str:
         '''Generate the HTML page with enhanced features'''
-        log_size = os.path.getsize(LOG_FILE) if os.path.exists(LOG_FILE) else 0
+        # Safe log size calculation with proper error handling
+        try:
+            log_size = (os.path.getsize(LOG_FILE) / (1024 * 1024)) if os.path.exists(LOG_FILE) else 0
+        except (OSError, IOError):
+            log_size = 0
+            
         last_updated = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        sync_status, status_color = self.get_sync_status()
         
         css_styles = '''
         body { 
@@ -114,7 +218,7 @@ class EnhancedLogHandler(http.server.SimpleHTTPRequestHandler):
             font-weight: bold; 
         }
         .log-content { 
-            background: #010409; padding: 20px; max-height: 500px; overflow-y: auto; 
+            background: #010409; padding: 20px; max-height: 75vh; overflow-y: auto; 
             white-space: pre-wrap; font-size: 13px; line-height: 1.4;
             scrollbar-width: thin; scrollbar-color: #30363d #0d1117;
         }
@@ -136,7 +240,7 @@ class EnhancedLogHandler(http.server.SimpleHTTPRequestHandler):
         return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>📄 Rsync Backup Management</title>
+    <title>Rsync Backup Management</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>{css_styles}</style>
@@ -151,12 +255,13 @@ class EnhancedLogHandler(http.server.SimpleHTTPRequestHandler):
         <div class="controls-status">
             <div class="system-status">
                 💾 Load: {load_avg[0]:.2f}, {load_avg[1]:.2f}, {load_avg[2]:.2f} | 
-                📄 Log: {log_size} bytes
+                📄 Log Size: {log_size:.2f} MB | 
+                <span style="color: {status_color}; font-weight: bold;">{sync_status}</span>
             </div>
             <div class="controls">
-                <button class="btn primary" onclick="location.reload()">🔄 Refresh</button>
                 <button class="btn primary" onclick="runSync()">▶️ Run Sync Now</button>
-                <button class="btn warning" onclick="clearLogs()">🗑️ Clear Logs</button>
+                <button class="btn" onclick="location.reload()">🔄 Refresh</button>
+                <button class="btn" onclick="clearLogs()">🗑️ Clear Logs</button>
             </div>
         </div>
 
@@ -241,9 +346,9 @@ class EnhancedLogHandler(http.server.SimpleHTTPRequestHandler):
 </body>
 </html>'''
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         try:
-            if self.path == "/" or self.path == "/logs":
+            if self.path == '/' or self.path == '/logs':
                 self.send_response(200)
                 self.send_header('Content-type', 'text/html; charset=utf-8')
                 self.send_header('Cache-Control', 'no-cache')
@@ -261,21 +366,30 @@ class EnhancedLogHandler(http.server.SimpleHTTPRequestHandler):
                 html = self.generate_html_page(sync_log, load_avg)
                 self.wfile.write(html.encode('utf-8'))
                 
-            elif self.path == "/api/status":
+            elif self.path == '/api/status':
                 # JSON API endpoint for status
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 
+                # Safe log size calculation with proper error handling
+                try:
+                    log_size = (
+                        round((os.path.getsize(LOG_FILE) / (1024 * 1024)), 2) 
+                        if os.path.exists(LOG_FILE) else 0
+                    )
+                except (OSError, IOError):
+                    log_size = 0
+                
                 status = {
-                    "timestamp": datetime.now().isoformat(),
-                    "log_exists": os.path.exists(LOG_FILE),
-                    "log_size": os.path.getsize(LOG_FILE) if os.path.exists(LOG_FILE) else 0,
-                    "server_uptime": "online"
+                    'timestamp': datetime.now().isoformat(),
+                    'log_exists': os.path.exists(LOG_FILE),
+                    'log_size': log_size,
+                    'server_uptime': 'online'
                 }
                 self.wfile.write(json.dumps(status).encode())
                 
-            elif self.path == "/favicon.ico":
+            elif self.path == '/favicon.ico':
                 # Simple SVG favicon with document icon
                 self.send_response(200)
                 self.send_header('Content-type', 'image/svg+xml')
@@ -291,13 +405,46 @@ class EnhancedLogHandler(http.server.SimpleHTTPRequestHandler):
                 </svg>'''
                 self.wfile.write(svg_favicon.encode())
             else:
-                self.send_error(404, "Not found")
+                self.send_error(404, 'Not found')
         except Exception as e:
-            logger.error(f"Error in GET request: {e}")
-            self.send_error(500, f"Internal server error: {str(e)}")
+            logger.error(f'Error in GET request: {e}')
+            self.send_error(500, f'Internal server error: {str(e)}')
 
     def do_POST(self) -> None:
         try:
+            # Security: Validate content type and content length
+            content_type = self.headers.get('Content-Type', '')
+            content_length = self.headers.get('Content-Length')
+            
+            # Limit request size to prevent DoS
+            if content_length and int(content_length) > 1024:  # 1KB limit
+                self.send_error(413, 'Request entity too large')
+                return
+                
+            # Read and validate request body if present
+            request_data = None
+            if content_length:
+                try:
+                    body = self.rfile.read(int(content_length))
+                    if content_type.startswith('application/json') and body:
+                        request_data = json.loads(body.decode('utf-8'))
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+                    logger.warning(f'Invalid request data: {e}')
+                    self.send_error(400, 'Invalid request data')
+                    return
+            
+            # Add security headers to all responses
+            def send_secure_response(status_code: int, 
+                                   content_type: str = 'application/json') -> None:
+                self.send_response(status_code)
+                self.send_header('Content-type', content_type)
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('X-Frame-Options', 'DENY')
+                self.send_header(
+                    'Cache-Control', 'no-cache, no-store, must-revalidate'
+                )
+                self.end_headers()
+            
             if self.path == '/clear':
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 
@@ -309,35 +456,70 @@ class EnhancedLogHandler(http.server.SimpleHTTPRequestHandler):
                     with open(SERVER_LOG_FILE, 'w') as f:
                         f.write(f'[{timestamp}] [INFO] Server logs cleared via web interface\n')
                 
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
+                send_secure_response(200)
                 self.wfile.write(json.dumps({'status': 'success'}).encode())
                 logger.info('Logs cleared via web interface')
                 
-            elif self.path == "/run":
+            elif self.path == '/run':
                 try:
-                    # Run sync script in background like the working web_server.py
-                    os.system('/bin/bash /src/sync_script.sh >> /config/logs/sync.log 2>&1 &')
+                    # Run sync script in background using secure subprocess
+                    with open('/config/logs/sync.log', 'a') as log_file:
+                        process = subprocess.Popen(
+                            ['/bin/bash', '/src/sync_script.sh'],
+                            stdout=log_file,
+                            stderr=subprocess.STDOUT,
+                            cwd='/',
+                            env=os.environ.copy(),
+                            start_new_session=True
+                        )
                     
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"status": "started"}).encode())
-                    logger.info("Sync script started via web interface")
+                    send_secure_response(200)
+                    self.wfile.write(
+                        json.dumps(
+                            {'status': 'started', 'pid': process.pid}
+                        ).encode()
+                    )
+                    logger.info(
+                        f'Sync script started via web interface with PID {process.pid}'
+                    )
                     
+                except (OSError, subprocess.SubprocessError) as e:
+                    logger.error(f'Failed to start sync script: {e}')
+                    send_secure_response(500)
+                    self.wfile.write(
+                        json.dumps(
+                            {'status': 'error', 'message': 'Failed to start sync process'}
+                        ).encode()
+                    )
                 except Exception as e:
-                    logger.error(f"Failed to start sync script: {e}")
-                    self.send_error(500, f"Failed to start sync: {str(e)}")
+                    logger.error(f'Unexpected error starting sync: {e}')
+                    send_secure_response(500)
+                    self.wfile.write(
+                        json.dumps(
+                            {'status': 'error', 'message': 'Internal server error'}
+                        ).encode()
+                    )
                     
             else:
-                self.send_error(404, "Endpoint not found")
+                self.send_error(404, 'Endpoint not found')
                 
         except Exception as e:
-            logger.error(f"Error in POST request: {e}")
-            self.send_error(500, f"Internal server error: {str(e)}")
+            logger.error(f'Error in POST request: {e}')
+            try:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {'status': 'error', 'message': 'Internal server error'}
+                    ).encode()
+                )
+            except Exception:
+                # If we can't send a proper error response, just close the connection
+                pass
 
-def signal_handler(sig: int, frame) -> None:
+def signal_handler(sig: int, frame: Any) -> None:
     logger.info('Received shutdown signal')
     sys.exit(0)
 
@@ -353,7 +535,9 @@ if __name__ == '__main__':
         try:
             httpd = socketserver.TCPServer(('', PORT), EnhancedLogHandler)
         except PermissionError:
-            logger.warning(f'Permission denied for port {PORT}, trying port 8080')
+            logger.warning(
+                f'Permission denied for port {PORT}, trying port 8080'
+            )
             PORT = 8080
             httpd = socketserver.TCPServer(('', PORT), EnhancedLogHandler)
         

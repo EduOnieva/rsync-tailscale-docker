@@ -28,3 +28,8 @@ Thumbs.db
 *.swn
 *.bak
 *.tmp
+
+# Python test
+__pycache__/
+*.pyc
+

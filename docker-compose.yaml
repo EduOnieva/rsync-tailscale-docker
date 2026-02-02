@@ -27,6 +27,7 @@ services:
     build:
       context: .
       dockerfile: build/Dockerfile
+      target: production
     volumes:
       - ./config:/config
       - ~/.ssh:/mnt/ssh_keys:ro
@@ -42,7 +43,30 @@ services:
       - CRON_SCHEDULE=30 2 * * 1  # Weekly on Monday at 2:30 AM
       - SSH_KEY_FILE=id_rsa
       - TZ=Europe/Madrid  # Your timezone
-      - ROUTES_FILE=/src/backup_routes.json
+      - ROUTES_FILE=backup_routes.json
+
+  # Test service for running tests in container
+  rsync-backup-test:
+    container_name: rsync-backup-test
+    build:
+      context: .
+      dockerfile: build/Dockerfile
+      target: testing
+    volumes:
+      # Mount source code for live development testing
+      - ./src:/src
+      - ./tests:/tests
+      - ./pytest.ini:/pytest.ini
+      - ./run_tests.sh:/run_tests.sh
+      - ./requirements-test.txt:/requirements-test.txt
+      # Create test logs directory
+      - ./test-logs:/logs
+    environment:
+      - TZ=Europe/Madrid
+      - PYTHONPATH=/src
+    profiles:
+      - testing
+    command: ["/run_tests.sh", "help"]
     
 networks:
   backup:
